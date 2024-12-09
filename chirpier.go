@@ -113,7 +113,7 @@ func initializeWithClient(options Options, httpClient *http.Client) error {
 	defer mu.Unlock()
 
 	if instance != nil {
-		return errors.New("Chirpier SDK is already initialized")
+		return errors.New("chirpier SDK is already initialized")
 	}
 
 	client, err := newClient(options, httpClient)
@@ -135,7 +135,7 @@ func Monitor(ctx context.Context, event Event) error {
 	mu.RUnlock()
 
 	if client == nil {
-		return errors.New("Chirpier SDK is not initialized. Please call Initialize() first")
+		return errors.New("chirpier SDK is not initialized. Please call Initialize() first")
 	}
 
 	return client.Monitor(ctx, event)
@@ -345,13 +345,10 @@ func (c *Client) sendEvents(events []Event) error {
 		if resp != nil && resp.Body != nil {
 			defer resp.Body.Close()
 		}
-		if err != nil {
-			return fmt.Errorf("failed to send request: %w", err)
-		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode >= http.StatusBadRequest {
-			return fmt.Errorf("API request failed with status code: %d", resp.StatusCode)
+			return fmt.Errorf("request failed with status code: %d", resp.StatusCode)
 		}
 
 		return nil
