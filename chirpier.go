@@ -1,4 +1,23 @@
 // Package chirpier provides a client SDK for sending monitoring events to the Chirpier service.
+//
+// The package implements a thread-safe client that batches events and sends them to the Chirpier API.
+// It handles automatic retries with exponential backoff, graceful shutdown, and proper error handling.
+//
+// Basic usage:
+//
+//	err := chirpier.Initialize(chirpier.Options{
+//	    Key: "your-api-key",
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	event := chirpier.Event{
+//	    GroupID:    "f3438ee9-b964-48aa-b938-a803df440a3c",
+//	    StreamName: "Clicks",
+//	    Value:      1,
+//	}
+//	err = chirpier.Monitor(context.Background(), event)
 package chirpier
 
 import (
@@ -18,10 +37,10 @@ import (
 	"github.com/google/uuid"
 )
 
-// Default configuration values
+// Default configuration values used by the client
 const (
 	defaultAPIEndpoint = "https://events.chirpier.co/v1.0/events"
-	defaultRetries     = 6
+	defaultRetries     = 5
 	defaultTimeout     = 10 * time.Second
 	defaultBatchSize   = 50
 	defaultFlushDelay  = 500 * time.Millisecond
@@ -29,6 +48,7 @@ const (
 )
 
 // Event represents a monitoring event to be sent to Chirpier.
+// Each event must have a GroupID (UUID), StreamName (string), and Value (float64).
 type Event struct {
 	// GroupID is a UUID that identifies the group this event belongs to
 	GroupID string `json:"group_id"`
@@ -39,6 +59,7 @@ type Event struct {
 }
 
 // Options contains configuration options for initializing the Chirpier client.
+// Only Key is required; other fields are optional and will use defaults if not specified.
 type Options struct {
 	// Key is the API key used to authenticate with Chirpier (required)
 	Key string
@@ -47,6 +68,7 @@ type Options struct {
 }
 
 // Error represents a Chirpier-specific error.
+// It implements the error interface and provides additional context about API errors.
 type Error struct {
 	Message string
 }
@@ -57,6 +79,7 @@ func (e *Error) Error() string {
 }
 
 // Client handles communication with the Chirpier API.
+// It manages event batching, retries, and connection pooling.
 type Client struct {
 	apiKey      string
 	apiEndpoint string
@@ -79,6 +102,7 @@ var (
 
 // Initialize creates and configures a new Chirpier client instance.
 // It returns an error if initialization fails or if the client is already initialized.
+// The client must be initialized before any events can be monitored.
 func Initialize(options Options) error {
 	return initializeWithClient(options, nil)
 }
@@ -104,6 +128,7 @@ func initializeWithClient(options Options, httpClient *http.Client) error {
 
 // Monitor sends an event to be monitored using the global Chirpier instance.
 // It returns an error if the SDK is not initialized or if the event is invalid.
+// Events are batched and sent asynchronously for better performance.
 func Monitor(ctx context.Context, event Event) error {
 	mu.RLock()
 	client := instance
@@ -118,6 +143,7 @@ func Monitor(ctx context.Context, event Event) error {
 
 // Stop gracefully shuts down the Chirpier client, flushing any remaining events.
 // It returns an error if the shutdown fails or times out.
+// After stopping, the client must be reinitialized before sending more events.
 func Stop(ctx context.Context) error {
 	mu.Lock()
 	defer mu.Unlock()
