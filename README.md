@@ -26,33 +26,43 @@ Here's a quick example of how to use the Chirpier SDK:
 package main
 
 import (
-    "fmt"
-    "time"
-    "github.com/chirpier/chirpier-go"
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/chirpier/chirpier-go"
 )
 
 func main() {
-    // Initialize the Chirpier client
-    err := chirpier.Initialize(chirpier.Options{
-        Key: "your-api-key",
-    })
-    if err != nil {
-        fmt.Printf("Error initializing Chirpier: %v\n", err)
-        return
-    }
+	// Initialize the Chirpier client
+	err := chirpier.Initialize(chirpier.Options{
+		Key: "your-api-key",
+	})
+	if err != nil {
+		fmt.Printf("Error initializing Chirpier: %v\n", err)
+		return
+	}
 
-    // Create and send an event
-    event := chirpier.Event{
+	// Create and send an event
+	event := chirpier.Event{
         GroupID: "f3438ee9-b964-48aa-b938-a803df440a3c",
-        Stream:  "test-stream",
-        Value:   42.0,
-    }
-    err = chirpier.Monitor(event)
-    if err != nil {
-        fmt.Printf("Error monitoring event: %v\n", err)
-        return
-    }
+		StreamName: "Clicks",
+		Value:      1,
+	}
+	err = chirpier.Monitor(context.Background(), event)
+	if err != nil {
+		fmt.Printf("Error monitoring event: %v\n", err)
+		return
+	}
+
+	// Create a context with timeout to ensure proper shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Wait for any pending events to be sent
+	<-ctx.Done()
 }
+
 ```
 
 ## Initialization
@@ -65,7 +75,7 @@ if err != nil {
     // Handle error
 }
 
-err = client.Monitor(event)
+err = client.Monitor(ctx, event)
 ```
 
 ## Running Tests
