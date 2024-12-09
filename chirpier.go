@@ -21,7 +21,7 @@ import (
 // Default configuration values
 const (
 	defaultAPIEndpoint = "https://events.chirpier.co/v1.0/events"
-	defaultRetries     = 5
+	defaultRetries     = 6
 	defaultTimeout     = 10 * time.Second
 	defaultBatchSize   = 50
 	defaultFlushDelay  = 500 * time.Millisecond
