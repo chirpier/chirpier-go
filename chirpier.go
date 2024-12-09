@@ -21,7 +21,7 @@ import (
 // Default configuration values
 const (
 	defaultAPIEndpoint = "https://events.chirpier.co/v1.0/events"
-	defaultRetries     = 1
+	defaultRetries     = 5
 	defaultTimeout     = 10 * time.Second
 	defaultBatchSize   = 50
 	defaultFlushDelay  = 500 * time.Millisecond
@@ -216,24 +216,17 @@ func (c *Client) Monitor(ctx context.Context, event Event) error {
 
 // Stop gracefully shuts down the client, ensuring all queued events are sent.
 func (c *Client) Stop(ctx context.Context) error {
-	c.stopChan <- struct{}{}
+	// Signal stop by closing the stopChan
+	close(c.stopChan)
 
-	// Wait for all events to be flushed
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-c.doneChan:
-			// Ensure all events are flushed
-			c.flushEvents()
-			return nil
-		case <-ticker.C:
-			// Periodically flush events while waiting
-			c.flushEvents()
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	// Wait for processing to complete or context to timeout
+	select {
+	case <-c.doneChan:
+		// Ensure final flush
+		c.flushEvents()
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("shutdown timed out: %w", ctx.Err())
 	}
 }
 
@@ -246,12 +239,21 @@ func (c *Client) run() {
 
 	for {
 		select {
-		case event := <-c.eventChan:
+		case event, ok := <-c.eventChan:
+			if !ok {
+				// Channel was closed
+				c.flushEvents()
+				return
+			}
 			c.queueEvent(event)
 		case <-ticker.C:
 			c.flushEvents()
 		case <-c.stopChan:
-			// Ensure all queued events are flushed before stopping
+			// Drain any remaining events from the channel
+			for len(c.eventChan) > 0 {
+				event := <-c.eventChan
+				c.queueEvent(event)
+			}
 			c.flushEvents()
 			return
 		}
