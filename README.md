@@ -44,12 +44,14 @@ func main() {
 	}
 
 	// Create and send an event
-	event := chirpier.Event{
-        GroupID: "f3438ee9-b964-48aa-b938-a803df440a3c",
-		StreamName: "Clicks",
-		Value:      1,
-	}
-	err = chirpier.Monitor(context.Background(), event)
+	err = chirpier.Monitor(
+		context.Background(),
+		chirpier.Event{
+			GroupID:    "bfd9299d-817a-452f-bc53-6e154f2281fc",
+			StreamName: "My measurement",
+			Value:      1,
+		},
+	)
 	if err != nil {
 		fmt.Printf("Error monitoring event: %v\n", err)
 		return
@@ -96,4 +98,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Support
 
-If you encounter any problems or have any questions, please open an issue on the GitHub repository.
+If you encounter any problems or have any questions, please open an issue on the GitHub repository or contact us at contact@chirpier.co.

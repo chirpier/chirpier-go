@@ -13,7 +13,7 @@
 //	}
 //
 //	event := chirpier.Event{
-//	    GroupID:    "f3438ee9-b964-48aa-b938-a803df440a3c",
+//	    GroupID:    "bfd9299d-817a-452f-bc53-6e154f2281fc",
 //	    StreamName: "Clicks",
 //	    Value:      1,
 //	}
@@ -42,9 +42,9 @@ const (
 	defaultAPIEndpoint = "https://events.chirpier.co/v1.0/events"
 	defaultRetries     = 5
 	defaultTimeout     = 10 * time.Second
-	defaultBatchSize   = 50
+	defaultBatchSize   = 1000
 	defaultFlushDelay  = 500 * time.Millisecond
-	defaultBufferSize  = 1000
+	defaultBufferSize  = 10000
 )
 
 // Event represents a monitoring event to be sent to Chirpier.
