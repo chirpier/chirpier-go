@@ -37,14 +37,29 @@ import (
 	"github.com/google/uuid"
 )
 
+// LogLevel represents different logging levels
+type LogLevel int
+
+const (
+	// LogLevelNone disables all logging
+	LogLevelNone LogLevel = iota
+	// LogLevelError enables error logging only
+	LogLevelError
+	// LogLevelInfo enables info and error logging
+	LogLevelInfo
+	// LogLevelDebug enables all logging
+	LogLevelDebug
+)
+
 // Default configuration values used by the client
 const (
 	defaultAPIEndpoint = "https://events.chirpier.co/v1.0/events"
-	defaultRetries     = 5
+	defaultRetries     = 10
 	defaultTimeout     = 10 * time.Second
-	defaultBatchSize   = 1000
+	defaultBatchSize   = 100
 	defaultFlushDelay  = 500 * time.Millisecond
-	defaultBufferSize  = 10000
+	defaultBufferSize  = 2000
+	defaultLogLevel    = LogLevelNone
 )
 
 // Event represents a monitoring event to be sent to Chirpier.
@@ -65,6 +80,8 @@ type Options struct {
 	Key string
 	// APIEndpoint allows overriding the default Chirpier API endpoint
 	APIEndpoint string
+	// LogLevel controls the verbosity of logging (optional, defaults to None)
+	LogLevel LogLevel
 }
 
 // Error represents a Chirpier-specific error.
@@ -93,6 +110,8 @@ type Client struct {
 	eventChan   chan Event
 	stopChan    chan struct{}
 	doneChan    chan struct{}
+	flushMutex  sync.Mutex
+	logLevel    LogLevel
 }
 
 var (
@@ -146,33 +165,15 @@ func Monitor(ctx context.Context, event Event) error {
 // After stopping, the client must be reinitialized before sending more events.
 func Stop(ctx context.Context) error {
 	mu.Lock()
-	defer mu.Unlock()
+	localInstance := instance
+	instance = nil
+	mu.Unlock()
 
-	if instance == nil {
+	if localInstance == nil {
 		return nil
 	}
 
-	// Create a local copy of the instance
-	localInstance := instance
-
-	// Set the global instance to nil before stopping
-	instance = nil
-
-	// Release the lock before calling Stop to avoid potential deadlock
-	mu.Unlock()
-
-	// Add a small delay to help mitigate potential race conditions
-	time.Sleep(500 * time.Millisecond)
-
-	err := localInstance.Stop(ctx)
-
-	// Add another small delay before re-acquiring the lock
-	time.Sleep(500 * time.Millisecond)
-
-	// Re-acquire the lock to ensure thread-safety
-	mu.Lock()
-
-	return err
+	return localInstance.Stop(ctx)
 }
 
 // newClient creates a new Chirpier client with the given options.
@@ -202,6 +203,7 @@ func newClient(options Options, httpClient *http.Client) (*Client, error) {
 		eventChan:   make(chan Event, defaultBufferSize),
 		stopChan:    make(chan struct{}),
 		doneChan:    make(chan struct{}),
+		logLevel:    options.LogLevel,
 	}
 
 	if options.APIEndpoint != "" {
@@ -232,7 +234,9 @@ func (c *Client) Monitor(ctx context.Context, event Event) error {
 	default:
 		select {
 		case c.eventChan <- event:
-			log.Printf("Event added to channel: %+v", event)
+			if c.logLevel >= LogLevelDebug {
+				log.Printf("Event added to channel: %+v", event)
+			}
 			return nil
 		default:
 			return &Error{"Event buffer is full"}
@@ -242,17 +246,12 @@ func (c *Client) Monitor(ctx context.Context, event Event) error {
 
 // Stop gracefully shuts down the client, ensuring all queued events are sent.
 func (c *Client) Stop(ctx context.Context) error {
-	// Signal stop by closing the stopChan
 	close(c.stopChan)
-
-	// Wait for processing to complete or context to timeout
 	select {
 	case <-c.doneChan:
-		// Ensure final flush
-		c.flushEvents()
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("shutdown timed out: %w", ctx.Err())
+		return ctx.Err()
 	}
 }
 
@@ -275,13 +274,15 @@ func (c *Client) run() {
 		case <-ticker.C:
 			c.flushEvents()
 		case <-c.stopChan:
-			// Drain any remaining events from the channel
-			for len(c.eventChan) > 0 {
-				event := <-c.eventChan
-				c.queueEvent(event)
+			for {
+				select {
+				case event := <-c.eventChan:
+					c.queueEvent(event)
+				default:
+					c.flushEvents()
+					return
+				}
 			}
-			c.flushEvents()
-			return
 		}
 	}
 }
@@ -289,33 +290,44 @@ func (c *Client) run() {
 // queueEvent adds an event to the queue and triggers a flush if the batch size is reached.
 func (c *Client) queueEvent(event Event) {
 	c.queueMutex.Lock()
-	defer c.queueMutex.Unlock()
-
 	c.eventQueue = append(c.eventQueue, event)
-	if len(c.eventQueue) >= c.batchSize {
-		go c.flushEvents()
+	shouldFlush := len(c.eventQueue) >= c.batchSize
+	c.queueMutex.Unlock()
+
+	if shouldFlush {
+		c.flushEvents()
 	}
 }
 
 // flushEvents sends all queued events to the Chirpier API.
 // Failed events are re-queued for retry.
 func (c *Client) flushEvents() {
+	// Ensure only one flush at a time
+	if !c.flushMutex.TryLock() {
+		return
+	}
+	defer c.flushMutex.Unlock()
+
 	c.queueMutex.Lock()
-	events := c.eventQueue
+	if len(c.eventQueue) == 0 {
+		c.queueMutex.Unlock()
+		return
+	}
+	events := make([]Event, len(c.eventQueue))
+	copy(events, c.eventQueue)
 	c.eventQueue = c.eventQueue[:0]
 	c.queueMutex.Unlock()
 
-	if len(events) > 0 {
-		log.Printf("Flushing %d events", len(events))
-		if err := c.sendEvents(events); err != nil {
-			log.Printf("Failed to send events: %v", err)
-			// Re-queue failed events
-			c.queueMutex.Lock()
-			c.eventQueue = append(c.eventQueue, events...)
-			c.queueMutex.Unlock()
-		} else {
-			log.Printf("Successfully sent %d events", len(events))
+	if err := c.sendEvents(events); err != nil {
+		if c.logLevel >= LogLevelError {
+			log.Printf("Error sending events: %v", err)
 		}
+		c.queueMutex.Lock()
+		// Prepend failed events to maintain order
+		c.eventQueue = append(events, c.eventQueue...)
+		c.queueMutex.Unlock()
+	} else if c.logLevel >= LogLevelInfo {
+		log.Printf("Successfully sent %d events", len(events))
 	}
 }
 
@@ -364,7 +376,11 @@ func (c *Client) retryRequest(requestFunc func() error) error {
 		}
 
 		if attempt < c.retries {
-			time.Sleep(time.Duration(math.Pow(2, float64(attempt))) * time.Second)
+			backoff := time.Duration(math.Pow(2, float64(attempt))) * time.Second
+			if c.logLevel >= LogLevelDebug {
+				log.Printf("Request failed, retrying in %v: %v", backoff, err)
+			}
+			time.Sleep(backoff)
 		}
 	}
 	return fmt.Errorf("failed to send request after %d attempts: %w", c.retries, err)
