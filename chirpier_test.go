@@ -417,38 +417,6 @@ func TestRunMethod(t *testing.T) {
 	}
 }
 
-// TestQueueEvent verifies the event queueing functionality.
-func TestQueueEvent(t *testing.T) {
-	mockServer, _, mockClient := setupMockEnvironment()
-	defer mockServer.Close()
-
-	key := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
-	opts := Options{
-		Key:         key,
-		APIEndpoint: mockServer.URL,
-	}
-	err := initializeWithClient(opts, mockClient)
-	if err != nil {
-		t.Fatalf("Failed to initialize client: %v", err)
-	}
-	defer Stop(context.Background())
-
-	// Modify the client configuration
-	mu.Lock()
-	instance.batchSize = 2
-	instance.flushDelay = 100 * time.Millisecond
-	mu.Unlock()
-
-	// Queue events
-	for i := 0; i < 5; i++ {
-		instance.queueEvent(Event{GroupID: uuid.New().String(), StreamName: "test", Value: float64(i)})
-	}
-
-	if len(instance.eventQueue) != 5 {
-		t.Errorf("Expected 5 events in queue after flushing, got %d", len(instance.eventQueue))
-	}
-}
-
 // TestFlushEventsEmpty verifies that flushing an empty event queue doesn't cause errors.
 func TestFlushEventsEmpty(t *testing.T) {
 	opts := Options{

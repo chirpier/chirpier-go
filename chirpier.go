@@ -56,9 +56,9 @@ const (
 	defaultAPIEndpoint = "https://events.chirpier.co/v1.0/events"
 	defaultRetries     = 10
 	defaultTimeout     = 10 * time.Second
-	defaultBatchSize   = 100
+	defaultBatchSize   = 350
 	defaultFlushDelay  = 500 * time.Millisecond
-	defaultBufferSize  = 2000
+	defaultBufferSize  = 25000
 	defaultLogLevel    = LogLevelNone
 )
 
