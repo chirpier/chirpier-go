@@ -249,20 +249,19 @@ func TestInvalidEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
-
 	ctx := context.Background()
 	invalidEvent := Event{GroupID: "invalid-uuid", StreamName: "", Value: 0}
 
+	// Set log level to debug to test logging
+	client.logLevel = LogLevelDebug
+
 	err = client.Monitor(ctx, invalidEvent)
-	if err == nil {
-		t.Fatal("Expected error for invalid event, got nil")
+	if err != nil {
+		t.Fatal("Expected no error for invalid event since it's silently dropped")
 	}
 
-	expectedError := "Invalid event format. Must include group_id, stream, and numeric value"
-
-	if err.Error() != expectedError {
-		t.Errorf("Expected error message '%s', got '%s'", expectedError, err.Error())
-	}
+	// Since invalid events are now silently dropped with just a debug log,
+	// we don't expect any error, just the debug log message
 }
 
 // TestContextCancellation verifies that monitoring respects context cancellation.

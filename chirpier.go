@@ -30,6 +30,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -53,13 +54,13 @@ const (
 
 // Default configuration values used by the client
 const (
-	defaultAPIEndpoint = "https://events.chirpier.co/v1.0/events"
-	defaultRetries     = 10
-	defaultTimeout     = 10 * time.Second
-	defaultBatchSize   = 350
-	defaultFlushDelay  = 500 * time.Millisecond
-	defaultBufferSize  = 25000
-	defaultLogLevel    = LogLevelNone
+	defaultRegion     = "events"
+	defaultRetries    = 10
+	defaultTimeout    = 10 * time.Second
+	defaultBatchSize  = 350
+	defaultFlushDelay = 500 * time.Millisecond
+	defaultBufferSize = 50000
+	defaultLogLevel   = LogLevelNone
 )
 
 // Event represents a monitoring event to be sent to Chirpier.
@@ -80,6 +81,8 @@ type Options struct {
 	Key string
 	// APIEndpoint allows overriding the default Chirpier API endpoint
 	APIEndpoint string
+	// Region allows overriding the default Chirpier API endpoint region
+	Region string
 	// LogLevel controls the verbosity of logging (optional, defaults to None)
 	LogLevel LogLevel
 }
@@ -191,9 +194,23 @@ func newClient(options Options, httpClient *http.Client) (*Client, error) {
 		httpClient = &http.Client{Timeout: defaultTimeout}
 	}
 
+	if options.Region != "us-west" &&
+		options.Region != "eu-west" &&
+		options.Region != "asia-southeast" {
+		options.Region = defaultRegion
+	}
+
+	if options.LogLevel == 0 {
+		options.LogLevel = defaultLogLevel
+	}
+
+	if options.APIEndpoint == "" {
+		options.APIEndpoint = fmt.Sprintf("https://%s.chirpier.co/v1.0/events", options.Region)
+	}
+
 	c := &Client{
 		apiKey:      options.Key,
-		apiEndpoint: defaultAPIEndpoint,
+		apiEndpoint: options.APIEndpoint,
 		retries:     defaultRetries,
 		timeout:     defaultTimeout,
 		client:      httpClient,
@@ -204,10 +221,6 @@ func newClient(options Options, httpClient *http.Client) (*Client, error) {
 		stopChan:    make(chan struct{}),
 		doneChan:    make(chan struct{}),
 		logLevel:    options.LogLevel,
-	}
-
-	if options.APIEndpoint != "" {
-		c.apiEndpoint = options.APIEndpoint
 	}
 
 	return c, nil
@@ -225,7 +238,9 @@ func (c *Client) isValidEvent(event Event) bool {
 // It validates the event format and returns an error if the event is invalid or the buffer is full.
 func (c *Client) Monitor(ctx context.Context, event Event) error {
 	if !c.isValidEvent(event) {
-		return &Error{"Invalid event format. Must include group_id, stream, and numeric value"}
+		if c.logLevel >= LogLevelDebug {
+			log.Printf("Invalid event format. Must include group_id, stream_name, and numeric value")
+		}
 	}
 
 	select {
@@ -239,7 +254,11 @@ func (c *Client) Monitor(ctx context.Context, event Event) error {
 			}
 			return nil
 		default:
-			return &Error{"Event buffer is full"}
+			if c.logLevel >= LogLevelDebug {
+				log.Printf("Event buffer full, dropping event: %+v", event)
+			}
+			return nil
+
 		}
 	}
 }
@@ -360,6 +379,16 @@ func (c *Client) sendEvents(events []Event) error {
 		defer resp.Body.Close()
 
 		if resp.StatusCode >= http.StatusBadRequest {
+			if resp.StatusCode == http.StatusTooManyRequests {
+				retryAfter := 1 * time.Second // Default retry after 1 second
+				if retryAfterStr := resp.Header.Get("Retry-After"); retryAfterStr != "" {
+					if seconds, err := strconv.Atoi(retryAfterStr); err == nil {
+						retryAfter = time.Duration(seconds) * time.Second
+					}
+				}
+				time.Sleep(retryAfter)
+				return fmt.Errorf("rate limited, retry after %v", retryAfter)
+			}
 			return fmt.Errorf("request failed with status code: %d", resp.StatusCode)
 		}
 
