@@ -54,7 +54,7 @@ const (
 
 // Default configuration values used by the client
 const (
-	defaultRegion     = "events"
+	defaultRegion     = "eu-west"
 	defaultRetries    = 10
 	defaultTimeout    = 10 * time.Second
 	defaultBatchSize  = 350
