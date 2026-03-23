@@ -1,29 +1,36 @@
 # Chirpier SDK
 
-The Chirpier SDK for Go is a simple, lightweight, and efficient SDK to emit event data to Chirpier direct from your Go applications.
+The Chirpier SDK for Go emits OpenClaw-friendly flat events to Chirpier/Ingres and can also manage monitors, alerts, and connectors.
 
 ## Features
 
-- Easy-to-use API for sending events to Chirpier
-- Automatic batching of events for improved performance
+- Easy-to-use API for sending logs to Chirpier
+- Automatic batching of logs for improved performance
 - Automatic retry mechanism with exponential backoff
 - Thread-safe operations
-- Periodic flushing of the event queue
+- Periodic flushing of the log queue
 
 ## Installation
 
 Install Chirpier SDK using `go get`:
 
+<!-- docs:start install -->
 ```bash
 go get github.com/chirpier/chirpier-go
 ```
+<!-- docs:end install -->
 
 ## Getting Started
 
 To start using the SDK, you need to initialize it with your API key.
+If `Key` is not provided, key resolution order is:
 
-Here's a quick example of how to use the Chirpier SDK:
+1. `CHIRPIER_API_KEY` from process environment
+2. `CHIRPIER_API_KEY` loaded from local `.env` file
 
+Here's a quick OpenClaw-oriented example:
+
+<!-- docs:start quickstart -->
 ```go
 package main
 
@@ -37,76 +44,211 @@ import (
 
 func main() {
     // Initialize the Chirpier client
-    err := chirpier.Initialize(chirpier.Options{
-        Key: "your-api-key",
-        Region: "us-west",
-    })
+    err := chirpier.Initialize(chirpier.Options{})
     if err != nil {
         fmt.Printf("Error initializing Chirpier: %v\n", err)
         return
     }
 
-    // Create and send an event
-    err = chirpier.Monitor(
+    // Send OpenClaw events
+    err = chirpier.LogEvent(
         context.Background(),
-        chirpier.Event{
-            GroupID:    "bfd9299d-817a-452f-bc53-6e154f2281fc",
-            StreamName: "My measurement",
-            Value:      1,
+        chirpier.Log{
+            AgentID: "openclaw.main",
+            Event:   "tool.errors.count",
+            Value:   1,
+            Meta: map[string]any{
+                "tool_name": "browser.open",
+            },
         },
     )
     if err != nil {
-        fmt.Printf("Error monitoring event: %v\n", err)
+        fmt.Printf("Error logging entry: %v\n", err)
         return
     }
 
-    // Create a context with timeout to ensure proper shutdown
+    // Create a context with timeout to ensure proper flush/shutdown
     ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
     defer cancel()
 
-    // Wait for any pending events to be sent
-    <-ctx.Done()
+    _ = chirpier.Flush(ctx)
+    _ = chirpier.Stop(ctx)
 }
 ```
+<!-- docs:end quickstart -->
 
 ## API Reference
 
 ### Initialize
 
-Initialize the Chirpier client with your API key and region. Find your API key in the Chirpier Integration page.
+Initialize the Chirpier client with your API key. Find your API key in the Chirpier Integration page.
 
 ```go
 err := chirpier.Initialize(chirpier.Options{
     Key: "your-api-key",
-    Region: "us-west",
+    APIEndpoint: "https://logs.chirpier.co/v1.0/logs",
+    ServicerEndpoint: "https://api.chirpier.co/v1.0",
 })
 ```
 
 - `your-api-key` (str): Your Chirpier integration key
-- `region` (str): Your local region - options are `us-west`, `eu-west`, `asia-southeast`
+- `CHIRPIER_API_KEY` (env/.env, optional): used when `Key` is omitted
+- `APIEndpoint` (str, optional): Override the full ingestion endpoint
+- `ServicerEndpoint` (str, optional): Override the control-plane endpoint; defaults to `https://api.chirpier.co/v1.0`
 
-### Event
+API keys must be bearer tokens that start with `chp_`.
+The same bearer token works for ingest and servicer APIs.
 
-All events emitted to Chirpier must be of type `Event`.
+### NewClient (Recommended)
+
+Create a standalone client instance instead of using global state.
 
 ```go
-event := chirpier.Event{
-    GroupID:    "bfd9299d-817a-452f-bc53-6e154f2281fc",
-    StreamName: "My measurement",
-    Value:      1,
+client, err := chirpier.NewClient(chirpier.Options{Key: "chp_your_api_key"})
+if err != nil {
+    return err
+}
+defer client.Close(context.Background())
+
+_ = client.Log(context.Background(), chirpier.Log{AgentID: "openclaw.main", Event: "task.duration_ms", Value: 420})
+_ = client.Flush(context.Background())
+```
+
+### Log
+
+All logs emitted to Chirpier must be of type `Log`.
+
+```go
+entry := chirpier.Log{
+    AgentID: "openclaw.main",
+    Event:   "task.duration_ms",
+    Value:   780,
+    OccurredAt: time.Now().UTC(),
+    Meta: map[string]any{
+        "task_name": "daily_digest",
+        "result":    "success",
+    },
 }
 ```
 
-- `group_id` (str): UUID of the monitoring group
-- `stream_name` (str): Name of the measurement stream
+- `agent_id` (str, optional): Free-form agent identifier text
+- `event` (str): Name of the event
 - `value` (float): Numeric value to record
+- `occurred_at` (timestamp, optional): Event occurrence time in UTC
+- `meta` (json, optional): Additional JSON-encodable metadata for the log
 
-### Monitor
+`agent_id` is optional. Whitespace-only values are treated as omitted.
+`occurred_at` is optional. If provided, it must be at most 30 days in the past and 1 day in the future.
+Use RFC3339/ISO8601 UTC timestamps (for example, `2026-03-05T14:30:00Z`).
+Unknown events are auto-created in Ingres as event definitions.
 
-Send an event to Chirpier using the `Monitor` function.
+### Event Definitions
+
+Use the same client and bearer token to manage event definitions:
+
+<!-- docs:start common-tasks -->
+```go
+events, err := client.ListEvents(ctx)
+eventDef, err := client.GetEvent(ctx, events[0].EventID)
+updated, err := client.UpdateEvent(ctx, eventDef.EventID, map[string]any{
+    "title": "OpenClaw Tool Errors",
+    "semantic_class": "error_count",
+    "default_aggregate": "sum",
+})
+_ = updated
+```
+
+### Policies And Alerts
 
 ```go
-err = chirpier.Monitor(ctx, event)
+policies, err := client.ListPolicies(ctx)
+createdPolicy, err := client.CreatePolicy(ctx, chirpier.Policy{
+    EventID:   "evt_123",
+    Title:     "OpenClaw tool errors spike",
+    Condition: "gt",
+    Threshold: 5,
+    Enabled:   true,
+    Period:    "hour",
+    Aggregate: "sum",
+})
+alerts, err := client.ListAlerts(ctx, "triggered")
+deliveries, err := client.GetAlertDeliveries(ctx, alerts[0].AlertID, 20, 0, "alert")
+rollups, err := client.GetEventLogs(ctx, "evt_123", "hour", 25, 0)
+acknowledged, err := client.AcknowledgeAlert(ctx, alerts[0].AlertID)
+resolved, err := client.ResolveAlert(ctx, acknowledged.AlertID)
+archived, err := client.ArchiveAlert(ctx, resolved.AlertID)
+err = client.TestWebhook(ctx, "whk_123")
+_, _, _, _, _, _, _ = policies, createdPolicy, alerts, deliveries, rollups, archived, err
+```
+<!-- docs:end common-tasks -->
+
+### LogEvent
+
+Send a log to Chirpier using the `LogEvent` function.
+
+```go
+err = chirpier.LogEvent(ctx, entry)
+```
+
+Example with `occurred_at`:
+
+```go
+err = chirpier.LogEvent(ctx, chirpier.Log{
+    AgentID:    "openclaw.main",
+    Event:      "heartbeat.missed.count",
+    Value:      1,
+    OccurredAt: time.Date(2026, 3, 5, 14, 30, 0, 0, time.UTC),
+})
+```
+
+### Flush
+
+Flush queued logs for the global initialized client.
+
+```go
+err = chirpier.Flush(ctx)
+```
+
+### Close / Stop
+
+For standalone clients, call `client.Close(ctx)`.
+For global SDK usage, call `chirpier.Stop(ctx)`.
+
+## Connector Setup Examples
+
+Create a Slack connector for OpenClaw alerts:
+
+```go
+payload := map[string]any{
+    "url":     "https://hooks.slack.com/services/T000/B000/secret",
+    "type":    "slack",
+    "enabled": true,
+}
+
+reqBody, _ := json.Marshal(payload)
+req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.chirpier.co/v1.0/webhooks", bytes.NewReader(reqBody))
+req.Header.Set("Authorization", "Bearer "+apiKey)
+req.Header.Set("Content-Type", "application/json")
+_, _ = http.DefaultClient.Do(req)
+```
+
+Create a Telegram connector for OpenClaw alerts:
+
+```go
+payload := map[string]any{
+    "type":    "telegram",
+    "enabled": true,
+    "credentials": map[string]any{
+        "bot_token": "123456:telegram-bot-token",
+        "chat_id":   "987654321",
+    },
+}
+```
+
+Send a test notification:
+
+```go
+err = client.TestWebhook(ctx, "whk_123")
 ```
 
 ## Test
