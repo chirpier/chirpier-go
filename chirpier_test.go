@@ -380,7 +380,7 @@ func TestMonitor(t *testing.T) {
 		instance.batchSize = 2
 
 		for i := 0; i < 2; i++ {
-			err := instance.Log(ctx, Log{AgentID: uuid.New().String(), Event: "test", Value: float64(i)})
+			err := instance.Log(ctx, Log{Agent: uuid.New().String(), Event: "test", Value: float64(i)})
 			if err != nil {
 				t.Fatalf("Failed to log entry %d: %v", i+1, err)
 			}
@@ -400,7 +400,7 @@ func TestMonitor(t *testing.T) {
 		// Set a smaller flush delay for testing
 		instance.flushDelay = 100 * time.Millisecond
 
-		err := instance.Log(ctx, Log{AgentID: uuid.New().String(), Event: "test", Value: 42})
+		err := instance.Log(ctx, Log{Agent: uuid.New().String(), Event: "test", Value: 42})
 		if err != nil {
 			t.Fatalf("Failed to log entry: %v", err)
 		}
@@ -415,10 +415,10 @@ func TestMonitor(t *testing.T) {
 		}
 	})
 
-	t.Run("log without agent_id", func(t *testing.T) {
+	t.Run("log without agent", func(t *testing.T) {
 		err := instance.Log(ctx, Log{Event: "test-no-agent", Value: 7})
 		if err != nil {
-			t.Fatalf("Expected log without agent_id to succeed, got: %v", err)
+			t.Fatalf("Expected log without agent to succeed, got: %v", err)
 		}
 
 		select {
@@ -426,18 +426,18 @@ func TestMonitor(t *testing.T) {
 			if len(entries) != 1 {
 				t.Errorf("Expected 1 log, got %d", len(entries))
 			}
-			if entries[0].AgentID != "" {
-				t.Errorf("Expected empty agent_id, got %q", entries[0].AgentID)
+			if entries[0].Agent != "" {
+				t.Errorf("Expected empty agent, got %q", entries[0].Agent)
 			}
 		case <-time.After(300 * time.Millisecond):
-			t.Fatal("Timeout waiting for log without agent_id")
+			t.Fatal("Timeout waiting for log without agent")
 		}
 	})
 
-	t.Run("log with whitespace agent_id omits field", func(t *testing.T) {
-		err := instance.Log(ctx, Log{AgentID: "   ", Event: "test-whitespace-agent", Value: 11})
+	t.Run("log with whitespace agent omits field", func(t *testing.T) {
+		err := instance.Log(ctx, Log{Agent: "   ", Event: "test-whitespace-agent", Value: 11})
 		if err != nil {
-			t.Fatalf("Expected log with whitespace agent_id to succeed, got: %v", err)
+			t.Fatalf("Expected log with whitespace agent to succeed, got: %v", err)
 		}
 
 		select {
@@ -445,19 +445,19 @@ func TestMonitor(t *testing.T) {
 			if len(entries) != 1 {
 				t.Errorf("Expected 1 log, got %d", len(entries))
 			}
-			if entries[0].AgentID != "" {
-				t.Errorf("Expected whitespace-only agent_id to be omitted, got %q", entries[0].AgentID)
+			if entries[0].Agent != "" {
+				t.Errorf("Expected whitespace-only agent to be omitted, got %q", entries[0].Agent)
 			}
 		case <-time.After(300 * time.Millisecond):
-			t.Fatal("Timeout waiting for log with whitespace agent_id")
+			t.Fatal("Timeout waiting for log with whitespace agent")
 		}
 	})
 
 	t.Run("log with meta payload", func(t *testing.T) {
 		err := instance.Log(ctx, Log{
-			AgentID: "api.worker",
-			Event:   "request_finished",
-			Value:   200,
+			Agent: "api.worker",
+			Event: "request_finished",
+			Value: 200,
 			Meta: map[string]any{
 				"path":   "/v1.0/logs",
 				"status": "ok",
@@ -487,7 +487,8 @@ func TestMonitor(t *testing.T) {
 	t.Run("log with occurred_at", func(t *testing.T) {
 		occurredAt := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
 		err := instance.Log(ctx, Log{
-			AgentID:    "api.worker",
+			LogID:      uuid.New().String(),
+			Agent:      "api.worker",
 			Event:      "request_finished",
 			Value:      200,
 			OccurredAt: occurredAt,
@@ -506,6 +507,49 @@ func TestMonitor(t *testing.T) {
 			}
 		case <-time.After(300 * time.Millisecond):
 			t.Fatal("Timeout waiting for log with occurred_at")
+		}
+	})
+
+	t.Run("log generates log_id when omitted", func(t *testing.T) {
+		err := instance.Log(ctx, Log{Event: "generated-log-id", Value: 1})
+		if err != nil {
+			t.Fatalf("Expected log without log_id to succeed, got: %v", err)
+		}
+
+		select {
+		case entries := <-receivedLogs:
+			if len(entries) != 1 {
+				t.Errorf("Expected 1 log, got %d", len(entries))
+			}
+			parsed, err := uuid.Parse(entries[0].LogID)
+			if err != nil {
+				t.Fatalf("Expected generated log_id to be a UUID, got %q", entries[0].LogID)
+			}
+			if parsed.Version() != 7 {
+				t.Fatalf("Expected generated log_id to be UUIDv7, got version %d", parsed.Version())
+			}
+		case <-time.After(300 * time.Millisecond):
+			t.Fatal("Timeout waiting for log with generated log_id")
+		}
+	})
+
+	t.Run("log preserves provided log_id", func(t *testing.T) {
+		logID := uuid.New().String()
+		err := instance.Log(ctx, Log{LogID: logID, Event: "provided-log-id", Value: 1})
+		if err != nil {
+			t.Fatalf("Expected log with log_id to succeed, got: %v", err)
+		}
+
+		select {
+		case entries := <-receivedLogs:
+			if len(entries) != 1 {
+				t.Errorf("Expected 1 log, got %d", len(entries))
+			}
+			if entries[0].LogID != logID {
+				t.Fatalf("Expected log_id %q, got %q", logID, entries[0].LogID)
+			}
+		case <-time.After(300 * time.Millisecond):
+			t.Fatal("Timeout waiting for log with provided log_id")
 		}
 	})
 }
@@ -540,7 +584,7 @@ func TestRetryRequest(t *testing.T) {
 
 	ctx := context.Background()
 	err = client.retryRequest(ctx, func() error {
-		return client.sendLogs(ctx, []Log{{AgentID: uuid.New().String(), Event: "test", Value: 42}})
+		return client.sendLogs(ctx, []Log{{Agent: uuid.New().String(), Event: "test", Value: 42}})
 	})
 
 	if err != nil {
@@ -571,7 +615,7 @@ func TestInvalidEvent(t *testing.T) {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 	ctx := context.Background()
-	invalidEntry := Log{AgentID: "invalid-uuid", Event: "", Value: 0}
+	invalidEntry := Log{Agent: "invalid-uuid", Event: "", Value: 0}
 
 	// Set log level to debug to test logging
 	debugLevel := LogLevelDebug
@@ -587,9 +631,9 @@ func TestInvalidEvent(t *testing.T) {
 		t.Errorf("Expected error message to contain 'invalid log', got: %s", err.Error())
 	}
 
-	err = client.Log(ctx, Log{AgentID: "plain-text-agent", Event: "valid-event", Value: 1})
+	err = client.Log(ctx, Log{Agent: "plain-text-agent", Event: "valid-event", Value: 1})
 	if err != nil {
-		t.Fatalf("Expected plain-text agent_id to be accepted, got %v", err)
+		t.Fatalf("Expected plain-text agent to be accepted, got %v", err)
 	}
 
 	err = client.Log(ctx, Log{Event: "invalid-nan", Value: math.NaN()})
@@ -611,6 +655,11 @@ func TestInvalidEvent(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error for occurred_at more than 1 day in the future, got nil")
 	}
+
+	err = client.Log(ctx, Log{LogID: "not-a-uuid", Event: "invalid-log-id", Value: 1})
+	if err == nil {
+		t.Fatal("Expected error for invalid log_id, got nil")
+	}
 }
 
 // TestContextCancellation verifies that monitoring respects context cancellation.
@@ -631,7 +680,7 @@ func TestContextCancellation(t *testing.T) {
 	var monitorErr error
 
 	go func() {
-		monitorErr = client.Log(ctx, Log{AgentID: uuid.New().String(), Event: "test", Value: 42})
+		monitorErr = client.Log(ctx, Log{Agent: uuid.New().String(), Event: "test", Value: 42})
 		close(done)
 	}()
 
@@ -677,7 +726,7 @@ func TestStop(t *testing.T) {
 
 	// Add some logs to the queue
 	for i := 0; i < 3; i++ {
-		err := LogEvent(ctx, Log{AgentID: uuid.New().String(), Event: "test", Value: float64(i)})
+		err := LogEvent(ctx, Log{Agent: uuid.New().String(), Event: "test", Value: float64(i)})
 		if err != nil {
 			t.Fatalf("Failed to log entry: %v", err)
 		}
@@ -737,7 +786,7 @@ func TestRunMethod(t *testing.T) {
 	// Test that logs are processed in the background
 	totalLogs := 5
 	for i := 0; i < totalLogs; i++ {
-		err := LogEvent(ctx, Log{AgentID: uuid.New().String(), Event: "test", Value: float64(i)})
+		err := LogEvent(ctx, Log{Agent: uuid.New().String(), Event: "test", Value: float64(i)})
 		if err != nil {
 			t.Fatalf("Failed to log entry: %v", err)
 		}
@@ -799,7 +848,7 @@ func TestSendEventsError(t *testing.T) {
 	client.retries = 1
 
 	ctx := context.Background()
-	entries := []Log{{AgentID: uuid.New().String(), Event: "test", Value: 42}}
+	entries := []Log{{Agent: uuid.New().String(), Event: "test", Value: 42}}
 	err = client.sendLogs(ctx, entries)
 
 	if err == nil {
@@ -880,5 +929,145 @@ func TestGlobalFlush(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Timeout waiting for flushed global log")
+	}
+}
+
+func TestFlushRespectsBatchSize(t *testing.T) {
+	receivedLogs := make(chan []Log, 10)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var entries []Log
+		if err := json.NewDecoder(r.Body).Decode(&entries); err != nil {
+			t.Fatalf("failed to decode request body: %v", err)
+		}
+		receivedLogs <- entries
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Options{
+		Key:         "chp_test_batch_size_limit",
+		APIEndpoint: server.URL,
+		BatchSize:   10,
+		FlushDelay:  10 * time.Second,
+		MaxWorkers:  1,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create standalone client: %v", err)
+	}
+	defer client.Close(context.Background())
+
+	for i := 0; i < 25; i++ {
+		err = client.Log(context.Background(), Log{Event: "batch.limit", Value: float64(i)})
+		if err != nil {
+			t.Fatalf("Failed to enqueue log %d: %v", i, err)
+		}
+	}
+
+	err = client.Flush(context.Background())
+	if err != nil {
+		t.Fatalf("Failed to flush standalone client: %v", err)
+	}
+
+	totalLogs := 0
+	batchCount := 0
+	timeout := time.After(2 * time.Second)
+
+	for totalLogs < 25 {
+		select {
+		case entries := <-receivedLogs:
+			batchCount++
+			if len(entries) > 10 {
+				t.Fatalf("Expected batch size <= 10, got %d", len(entries))
+			}
+			totalLogs += len(entries)
+		case <-timeout:
+			t.Fatalf("Timeout waiting for flushed batches; received %d logs across %d batches", totalLogs, batchCount)
+		}
+	}
+
+	if totalLogs != 25 {
+		t.Fatalf("Expected 25 logs, got %d", totalLogs)
+	}
+
+	if batchCount != 3 {
+		t.Fatalf("Expected 3 batches, got %d", batchCount)
+	}
+}
+
+func TestLogBlocksUntilBufferAvailable(t *testing.T) {
+	client, err := newClient(Options{
+		Key:        "chp_test_blocking_log",
+		BufferSize: 1,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+
+	if err := client.Log(context.Background(), Log{Event: "first", Value: 1}); err != nil {
+		t.Fatalf("Failed to enqueue first log: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- client.Log(context.Background(), Log{Event: "second", Value: 2})
+	}()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("Expected second log to block, returned early with %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	select {
+	case <-client.logChan:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timed out draining first log from buffer")
+	}
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Expected second log to enqueue after buffer drained: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timed out waiting for blocked log to enqueue")
+	}
+
+	select {
+	case entry := <-client.logChan:
+		if entry.Event != "second" {
+			t.Fatalf("Expected second log in buffer, got %s", entry.Event)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timed out reading second log from buffer")
+	}
+}
+
+func TestLogReturnsContextErrorWhenBufferStaysFull(t *testing.T) {
+	client, err := newClient(Options{
+		Key:        "chp_test_blocking_log_ctx",
+		BufferSize: 1,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+
+	if err := client.Log(context.Background(), Log{Event: "first", Value: 1}); err != nil {
+		t.Fatalf("Failed to enqueue first log: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err = client.Log(ctx, Log{Event: "second", Value: 2})
+	if err == nil {
+		t.Fatal("Expected context cancellation error, got nil")
+	}
+	if err != context.DeadlineExceeded {
+		t.Fatalf("Expected context deadline exceeded, got %v", err)
+	}
+	if time.Since(start) < 40*time.Millisecond {
+		t.Fatalf("Expected Log to wait for buffer space before failing, returned too quickly in %v", time.Since(start))
 	}
 }

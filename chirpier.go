@@ -13,7 +13,7 @@
 //	}
 //
 //	entry := chirpier.Log{
-//	    AgentID: "openclaw.main",
+//	    Agent: "openclaw.main",
 //	    Event:   "http_requests",
 //	    Value:   1,
 //	}
@@ -38,6 +38,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 )
 
@@ -67,10 +68,12 @@ const (
 )
 
 // Log represents a log entry to be sent to Chirpier.
-// Event and Value are required; AgentID is optional.
+// Event and Value are required; Agent is optional.
 type Log struct {
-	// AgentID is an optional string that identifies the agent this log belongs to
-	AgentID string `json:"agent_id,omitempty"`
+	// LogID is a UUID idempotency key for this log event
+	LogID string `json:"log_id,omitempty"`
+	// Agent is an optional string that identifies the agent this log belongs to
+	Agent string `json:"agent,omitempty"`
 	// Event identifies the event for this log
 	Event string `json:"event"`
 	// Value is the numeric value for this log
@@ -82,19 +85,15 @@ type Log struct {
 }
 
 type EventDefinition struct {
-	EventID          string `json:"event_id"`
-	AgentID          string `json:"agent_id,omitempty"`
-	Event            string `json:"event"`
-	Title            string `json:"title,omitempty"`
-	Public           bool   `json:"public"`
-	Description      string `json:"description,omitempty"`
-	Unit             string `json:"unit,omitempty"`
-	SemanticClass    string `json:"semantic_class"`
-	DefaultAggregate string `json:"default_aggregate"`
-	Enabled          bool   `json:"enabled"`
-	Origin           string `json:"origin"`
-	ArchivedAt       string `json:"archived_at,omitempty"`
-	CreatedAt        string `json:"created_at,omitempty"`
+	EventID     string `json:"event_id"`
+	Agent       string `json:"agent,omitempty"`
+	Event       string `json:"event"`
+	Title       string `json:"title,omitempty"`
+	Public      bool   `json:"public"`
+	Description string `json:"description,omitempty"`
+	Unit        string `json:"unit,omitempty"`
+	Timezone    string `json:"archived_at,omitempty"`
+	CreatedAt   string `json:"created_at,omitempty"`
 }
 
 type Policy struct {
@@ -115,7 +114,7 @@ type Alert struct {
 	AlertID        string  `json:"alert_id"`
 	PolicyID       string  `json:"policy_id"`
 	EventID        string  `json:"event_id"`
-	AgentID        string  `json:"agent_id,omitempty"`
+	Agent          string  `json:"agent,omitempty"`
 	Event          string  `json:"event"`
 	Title          string  `json:"title"`
 	Period         string  `json:"period"`
@@ -147,7 +146,7 @@ type AlertDelivery struct {
 
 type EventLogPoint struct {
 	EventID    string  `json:"event_id"`
-	AgentID    string  `json:"agent_id,omitempty"`
+	Agent      string  `json:"agent,omitempty"`
 	Event      string  `json:"event"`
 	Period     string  `json:"period"`
 	OccurredAt string  `json:"occurred_at"`
@@ -583,6 +582,12 @@ func (c *Client) isValidLog(entry Log) bool {
 		return false
 	}
 
+	if entry.LogID != "" {
+		if _, err := uuid.Parse(strings.TrimSpace(entry.LogID)); err != nil {
+			return false
+		}
+	}
+
 	if math.IsNaN(entry.Value) || math.IsInf(entry.Value, 0) {
 		return false
 	}
@@ -604,14 +609,22 @@ func (c *Client) isValidLog(entry Log) bool {
 }
 
 // Log queues a log for sending to Chirpier.
-// It validates the log format and returns an error if the log is invalid or the buffer is full.
+// It validates the log format and blocks until the log is enqueued or the context is canceled.
 func (c *Client) Log(ctx context.Context, entry Log) error {
 	if !c.isValidLog(entry) {
-		return &Error{Message: "invalid log: event must not be empty, value must be finite, meta must be JSON-encodable when provided, and occurred_at must be within the last 30 days and no more than 1 day in the future"}
+		return &Error{Message: "invalid log: log_id must be a UUID when provided, event must not be empty, value must be finite, meta must be JSON-encodable when provided, and occurred_at must be within the last 30 days and no more than 1 day in the future"}
 	}
 
+	entry.LogID = strings.TrimSpace(entry.LogID)
+	if entry.LogID == "" {
+		generated, err := uuid.NewV7()
+		if err != nil {
+			return err
+		}
+		entry.LogID = generated.String()
+	}
 	entry.Event = strings.TrimSpace(entry.Event)
-	entry.AgentID = strings.TrimSpace(entry.AgentID)
+	entry.Agent = strings.TrimSpace(entry.Agent)
 	if !entry.OccurredAt.IsZero() {
 		entry.OccurredAt = entry.OccurredAt.UTC()
 	}
@@ -619,19 +632,11 @@ func (c *Client) Log(ctx context.Context, entry Log) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	default:
-		select {
-		case c.logChan <- entry:
-			if c.logLevel >= LogLevelDebug {
-				log.Printf("Log added to channel: %+v", entry)
-			}
-			return nil
-		default:
-			if c.logLevel >= LogLevelError {
-				log.Printf("Log buffer full, dropping log: %+v", entry)
-			}
-			return &Error{Message: "log buffer full, log dropped"}
+	case c.logChan <- entry:
+		if c.logLevel >= LogLevelDebug {
+			log.Printf("Log added to channel: %+v", entry)
 		}
+		return nil
 	}
 }
 
@@ -796,7 +801,7 @@ func (c *Client) queueLog(entry Log) {
 	}
 }
 
-// flushLogs sends all queued logs to the worker pool for processing.
+// flushLogs sends queued logs to the worker pool in chunks capped by batchSize.
 // Logs are submitted as batches to workers for concurrent sending.
 func (c *Client) flushLogs() {
 	// Ensure only one flush at a time
@@ -815,20 +820,31 @@ func (c *Client) flushLogs() {
 	c.logQueue = c.logQueue[:0]
 	c.queueMutex.Unlock()
 
-	// Submit batch to worker pool for concurrent processing
-	select {
-	case c.batchQueue <- entries:
-		if c.logLevel >= LogLevelDebug {
-			log.Printf("Submitted batch of %d logs to worker pool", len(entries))
+	for start := 0; start < len(entries); start += c.batchSize {
+		end := start + c.batchSize
+		if end > len(entries) {
+			end = len(entries)
 		}
-	default:
-		// Worker queue is full, re-queue logs
-		if c.logLevel >= LogLevelError {
-			log.Printf("Worker queue full, re-queueing %d logs", len(entries))
+
+		batch := make([]Log, end-start)
+		copy(batch, entries[start:end])
+
+		select {
+		case c.batchQueue <- batch:
+			if c.logLevel >= LogLevelDebug {
+				log.Printf("Submitted batch of %d logs to worker pool", len(batch))
+			}
+		default:
+			remaining := make([]Log, len(entries)-start)
+			copy(remaining, entries[start:])
+			if c.logLevel >= LogLevelError {
+				log.Printf("Worker queue full, re-queueing %d logs", len(remaining))
+			}
+			c.queueMutex.Lock()
+			c.logQueue = append(remaining, c.logQueue...)
+			c.queueMutex.Unlock()
+			return
 		}
-		c.queueMutex.Lock()
-		c.logQueue = append(entries, c.logQueue...)
-		c.queueMutex.Unlock()
 	}
 }
 

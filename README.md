@@ -51,12 +51,13 @@ func main() {
     }
 
     // Send OpenClaw events
-    err = chirpier.LogEvent(
-        context.Background(),
-        chirpier.Log{
-            AgentID: "openclaw.main",
-            Event:   "tool.errors.count",
-            Value:   1,
+	 err = chirpier.LogEvent(
+	     context.Background(),
+	     chirpier.Log{
+	         LogID:   "9f97d65f-fb30-4062-b4d0-8617c03fe4f6",
+	         Agent: "openclaw.main",
+	         Event:   "tool.errors.count",
+	         Value:   1,
             Meta: map[string]any{
                 "tool_name": "browser.open",
             },
@@ -110,7 +111,7 @@ if err != nil {
 }
 defer client.Close(context.Background())
 
-_ = client.Log(context.Background(), chirpier.Log{AgentID: "openclaw.main", Event: "task.duration_ms", Value: 420})
+_ = client.Log(context.Background(), chirpier.Log{Agent: "openclaw.main", Event: "task.duration_ms", Value: 420})
 _ = client.Flush(context.Background())
 ```
 
@@ -120,7 +121,7 @@ All logs emitted to Chirpier must be of type `Log`.
 
 ```go
 entry := chirpier.Log{
-    AgentID: "openclaw.main",
+    Agent: "openclaw.main",
     Event:   "task.duration_ms",
     Value:   780,
     OccurredAt: time.Now().UTC(),
@@ -131,13 +132,15 @@ entry := chirpier.Log{
 }
 ```
 
-- `agent_id` (str, optional): Free-form agent identifier text
+- `agent` (str, optional): Free-form agent identifier text
+- `log_id` (uuid, optional): Idempotency key for the log; generated automatically when omitted
 - `event` (str): Name of the event
 - `value` (float): Numeric value to record
 - `occurred_at` (timestamp, optional): Event occurrence time in UTC
 - `meta` (json, optional): Additional JSON-encodable metadata for the log
 
-`agent_id` is optional. Whitespace-only values are treated as omitted.
+`agent` is optional. Whitespace-only values are treated as omitted.
+`log_id` is optional. If omitted or blank, the SDK generates a UUIDv4 automatically.
 `occurred_at` is optional. If provided, it must be at most 30 days in the past and 1 day in the future.
 Use RFC3339/ISO8601 UTC timestamps (for example, `2026-03-05T14:30:00Z`).
 Unknown events are auto-created in Ingres as event definitions.
@@ -152,8 +155,6 @@ events, err := client.ListEvents(ctx)
 eventDef, err := client.GetEvent(ctx, events[0].EventID)
 updated, err := client.UpdateEvent(ctx, eventDef.EventID, map[string]any{
     "title": "OpenClaw Tool Errors",
-    "semantic_class": "error_count",
-    "default_aggregate": "sum",
 })
 _ = updated
 ```
@@ -194,7 +195,7 @@ Example with `occurred_at`:
 
 ```go
 err = chirpier.LogEvent(ctx, chirpier.Log{
-    AgentID:    "openclaw.main",
+    Agent:    "openclaw.main",
     Event:      "heartbeat.missed.count",
     Value:      1,
     OccurredAt: time.Date(2026, 3, 5, 14, 30, 0, 0, time.UTC),
