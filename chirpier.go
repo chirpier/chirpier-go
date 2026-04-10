@@ -96,6 +96,16 @@ type EventDefinition struct {
 	CreatedAt   string `json:"created_at,omitempty"`
 }
 
+type CreateEventPayload struct {
+	Agent       string `json:"agent,omitempty"`
+	Event       string `json:"event"`
+	Title       string `json:"title,omitempty"`
+	Public      *bool  `json:"public,omitempty"`
+	Description string `json:"description,omitempty"`
+	Unit        string `json:"unit,omitempty"`
+	Timezone    string `json:"timezone,omitempty"`
+}
+
 type Policy struct {
 	PolicyID    string  `json:"policy_id,omitempty"`
 	EventID     string  `json:"event_id"`
@@ -135,7 +145,7 @@ type Alert struct {
 type AlertDelivery struct {
 	AttemptID      string `json:"attempt_id"`
 	AlertID        string `json:"alert_id"`
-	WebhookID      string `json:"webhook_id,omitempty"`
+	DestinationID  string `json:"destination_id,omitempty"`
 	Channel        string `json:"channel"`
 	Target         string `json:"target"`
 	Status         string `json:"status"`
@@ -155,6 +165,53 @@ type EventLogPoint struct {
 	Squares    float64 `json:"squares"`
 	Min        float64 `json:"min"`
 	Max        float64 `json:"max"`
+}
+
+type AnalyticsWindowQuery struct {
+	View     string
+	Period   string
+	Previous string
+}
+
+type AnalyticsWindowData struct {
+	CurrentValue   float64 `json:"current_value"`
+	CurrentCount   int     `json:"current_count"`
+	PreviousValue  float64 `json:"previous_value"`
+	PreviousCount  int     `json:"previous_count"`
+	ValueDelta     float64 `json:"value_delta"`
+	CountDelta     int     `json:"count_delta"`
+	ValuePctChange float64 `json:"value_pct_change"`
+	CountPctChange float64 `json:"count_pct_change"`
+	CurrentMean    float64 `json:"current_mean"`
+	PreviousMean   float64 `json:"previous_mean"`
+	MeanDelta      float64 `json:"mean_delta"`
+	MeanPctChange  float64 `json:"mean_pct_change"`
+	CurrentStddev  float64 `json:"current_stddev"`
+	PreviousStddev float64 `json:"previous_stddev"`
+}
+
+type AnalyticsWindowResponse struct {
+	EventID  string               `json:"event_id"`
+	View     string               `json:"view"`
+	Period   string               `json:"period"`
+	Previous string               `json:"previous"`
+	Data     *AnalyticsWindowData `json:"data"`
+}
+
+type DestinationTestResult struct {
+	AlertID       string `json:"alert_id"`
+	DestinationID string `json:"destination_id"`
+	Status        string `json:"status"`
+}
+
+type Destination struct {
+	DestinationID string         `json:"destination_id,omitempty"`
+	Channel       string         `json:"channel"`
+	URL           string         `json:"url,omitempty"`
+	Credentials   map[string]any `json:"credentials,omitempty"`
+	Scope         string         `json:"scope"`
+	PolicyIDs     []string       `json:"policy_ids,omitempty"`
+	Enabled       bool           `json:"enabled"`
 }
 
 // Options contains configuration options for initializing the Chirpier client.
@@ -421,6 +478,14 @@ func (c *Client) ListEvents(ctx context.Context) ([]EventDefinition, error) {
 	return events, nil
 }
 
+func (c *Client) CreateEvent(ctx context.Context, payload CreateEventPayload) (*EventDefinition, error) {
+	var event EventDefinition
+	if err := c.doJSON(ctx, http.MethodPost, c.servicerURL+"/events", payload, &event); err != nil {
+		return nil, err
+	}
+	return &event, nil
+}
+
 func (c *Client) GetEvent(ctx context.Context, eventID string) (*EventDefinition, error) {
 	var event EventDefinition
 	if err := c.doJSON(ctx, http.MethodGet, c.servicerURL+"/events/"+strings.TrimSpace(eventID), nil, &event); err != nil {
@@ -445,9 +510,25 @@ func (c *Client) ListPolicies(ctx context.Context) ([]Policy, error) {
 	return policies, nil
 }
 
+func (c *Client) GetPolicy(ctx context.Context, policyID string) (*Policy, error) {
+	var policy Policy
+	if err := c.doJSON(ctx, http.MethodGet, c.servicerURL+"/policies/"+strings.TrimSpace(policyID), nil, &policy); err != nil {
+		return nil, err
+	}
+	return &policy, nil
+}
+
 func (c *Client) CreatePolicy(ctx context.Context, payload Policy) (*Policy, error) {
 	var policy Policy
 	if err := c.doJSON(ctx, http.MethodPost, c.servicerURL+"/policies", payload, &policy); err != nil {
+		return nil, err
+	}
+	return &policy, nil
+}
+
+func (c *Client) UpdatePolicy(ctx context.Context, policyID string, payload Policy) (*Policy, error) {
+	var policy Policy
+	if err := c.doJSON(ctx, http.MethodPut, c.servicerURL+"/policies/"+strings.TrimSpace(policyID), payload, &policy); err != nil {
 		return nil, err
 	}
 	return &policy, nil
@@ -463,6 +544,14 @@ func (c *Client) ListAlerts(ctx context.Context, status string) ([]Alert, error)
 		return nil, err
 	}
 	return alerts, nil
+}
+
+func (c *Client) GetAlert(ctx context.Context, alertID string) (*Alert, error) {
+	var alert Alert
+	if err := c.doJSON(ctx, http.MethodGet, c.servicerURL+"/alerts/"+strings.TrimSpace(alertID), nil, &alert); err != nil {
+		return nil, err
+	}
+	return &alert, nil
 }
 
 func (c *Client) AcknowledgeAlert(ctx context.Context, alertID string) (*Alert, error) {
@@ -489,8 +578,44 @@ func (c *Client) ArchiveAlert(ctx context.Context, alertID string) (*Alert, erro
 	return &alert, nil
 }
 
-func (c *Client) TestWebhook(ctx context.Context, webhookID string) error {
-	return c.doJSON(ctx, http.MethodPost, c.servicerURL+"/webhooks/"+strings.TrimSpace(webhookID)+"/test", nil, nil)
+func (c *Client) ListDestinations(ctx context.Context) ([]Destination, error) {
+	var destinations []Destination
+	if err := c.doJSON(ctx, http.MethodGet, c.servicerURL+"/destinations", nil, &destinations); err != nil {
+		return nil, err
+	}
+	return destinations, nil
+}
+
+func (c *Client) CreateDestination(ctx context.Context, payload Destination) (*Destination, error) {
+	var destination Destination
+	if err := c.doJSON(ctx, http.MethodPost, c.servicerURL+"/destinations", payload, &destination); err != nil {
+		return nil, err
+	}
+	return &destination, nil
+}
+
+func (c *Client) GetDestination(ctx context.Context, destinationID string) (*Destination, error) {
+	var destination Destination
+	if err := c.doJSON(ctx, http.MethodGet, c.servicerURL+"/destinations/"+strings.TrimSpace(destinationID), nil, &destination); err != nil {
+		return nil, err
+	}
+	return &destination, nil
+}
+
+func (c *Client) UpdateDestination(ctx context.Context, destinationID string, payload Destination) (*Destination, error) {
+	var destination Destination
+	if err := c.doJSON(ctx, http.MethodPut, c.servicerURL+"/destinations/"+strings.TrimSpace(destinationID), payload, &destination); err != nil {
+		return nil, err
+	}
+	return &destination, nil
+}
+
+func (c *Client) TestDestination(ctx context.Context, destinationID string) (*DestinationTestResult, error) {
+	var result DestinationTestResult
+	if err := c.doJSON(ctx, http.MethodPost, c.servicerURL+"/destinations/"+strings.TrimSpace(destinationID)+"/test", nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 func (c *Client) GetAlertDeliveries(ctx context.Context, alertID string, limit int, offset int, kind string) ([]AlertDelivery, error) {
@@ -535,6 +660,28 @@ func (c *Client) GetEventLogs(ctx context.Context, eventID, period string, limit
 		return nil, err
 	}
 	return logs, nil
+}
+
+func (c *Client) GetEventAnalytics(ctx context.Context, eventID string, query AnalyticsWindowQuery) (*AnalyticsWindowResponse, error) {
+	endpoint := c.servicerURL + "/events/" + strings.TrimSpace(eventID) + "/analytics"
+	params := url.Values{}
+	if strings.TrimSpace(query.View) != "" {
+		params.Set("view", strings.TrimSpace(query.View))
+	}
+	if strings.TrimSpace(query.Period) != "" {
+		params.Set("period", strings.TrimSpace(query.Period))
+	}
+	if strings.TrimSpace(query.Previous) != "" {
+		params.Set("previous", strings.TrimSpace(query.Previous))
+	}
+	if encoded := params.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	var response AnalyticsWindowResponse
+	if err := c.doJSON(ctx, http.MethodGet, endpoint, nil, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
 }
 
 func (c *Client) doJSON(ctx context.Context, method, endpoint string, payload any, output any) error {

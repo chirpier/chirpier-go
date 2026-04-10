@@ -1,6 +1,6 @@
 # Chirpier SDK
 
-The Chirpier SDK for Go emits OpenClaw-friendly flat events to Chirpier/Ingres and can also manage monitors, alerts, and connectors.
+The Chirpier SDK for Go emits OpenClaw-friendly flat events to Chirpier/Ingres and can also manage events, policies, alerts, and destinations.
 
 ## Features
 
@@ -152,17 +152,25 @@ Use the same client and bearer token to manage event definitions:
 <!-- docs:start common-tasks -->
 ```go
 events, err := client.ListEvents(ctx)
+created, err := client.CreateEvent(ctx, chirpier.CreateEventPayload{Event: "tool.errors.count"})
 eventDef, err := client.GetEvent(ctx, events[0].EventID)
 updated, err := client.UpdateEvent(ctx, eventDef.EventID, map[string]any{
     "title": "OpenClaw Tool Errors",
 })
-_ = updated
+analytics, err := client.GetEventAnalytics(ctx, eventDef.EventID, chirpier.AnalyticsWindowQuery{
+    View:     "window",
+    Period:   "1h",
+    Previous: "previous_window",
+})
+_, _, _, _ = created, updated, analytics, err
 ```
 
 ### Policies And Alerts
 
 ```go
 policies, err := client.ListPolicies(ctx)
+policy, err := client.GetPolicy(ctx, "pol_123")
+updatedPolicy, err := client.UpdatePolicy(ctx, "pol_123", chirpier.Policy{Title: "Updated"})
 createdPolicy, err := client.CreatePolicy(ctx, chirpier.Policy{
     EventID:   "evt_123",
     Title:     "OpenClaw tool errors spike",
@@ -173,13 +181,19 @@ createdPolicy, err := client.CreatePolicy(ctx, chirpier.Policy{
     Aggregate: "sum",
 })
 alerts, err := client.ListAlerts(ctx, "triggered")
+alert, err := client.GetAlert(ctx, alerts[0].AlertID)
 deliveries, err := client.GetAlertDeliveries(ctx, alerts[0].AlertID, 20, 0, "alert")
 rollups, err := client.GetEventLogs(ctx, "evt_123", "hour", 25, 0)
 acknowledged, err := client.AcknowledgeAlert(ctx, alerts[0].AlertID)
 resolved, err := client.ResolveAlert(ctx, acknowledged.AlertID)
 archived, err := client.ArchiveAlert(ctx, resolved.AlertID)
-err = client.TestWebhook(ctx, "whk_123")
-_, _, _, _, _, _, _ = policies, createdPolicy, alerts, deliveries, rollups, archived, err
+destinations, err := client.ListDestinations(ctx)
+destination, err := client.CreateDestination(ctx, chirpier.Destination{Channel: "slack", URL: "https://hooks.slack.com/services/T000/B000/secret", Scope: "all", PolicyIDs: []string{}, Enabled: true})
+destinationDetails, err := client.GetDestination(ctx, destination.DestinationID)
+updatedDestination, err := client.UpdateDestination(ctx, destination.DestinationID, chirpier.Destination{Enabled: false})
+testResult, err := client.TestDestination(ctx, destination.DestinationID)
+testDeliveries, err := client.GetAlertDeliveries(ctx, testResult.AlertID, 20, 0, "test")
+_, _, _, _, _, _, _, _, _, _, _, _, _ = policies, policy, updatedPolicy, createdPolicy, alerts, alert, deliveries, rollups, archived, destinations, destinationDetails, updatedDestination, testDeliveries
 ```
 <!-- docs:end common-tasks -->
 
@@ -215,41 +229,40 @@ err = chirpier.Flush(ctx)
 For standalone clients, call `client.Close(ctx)`.
 For global SDK usage, call `chirpier.Stop(ctx)`.
 
-## Connector Setup Examples
+## Destination Setup Examples
 
-Create a Slack connector for OpenClaw alerts:
+Create a Slack destination for OpenClaw alerts:
 
 ```go
-payload := map[string]any{
-    "url":     "https://hooks.slack.com/services/T000/B000/secret",
-    "type":    "slack",
-    "enabled": true,
-}
-
-reqBody, _ := json.Marshal(payload)
-req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.chirpier.co/v1.0/webhooks", bytes.NewReader(reqBody))
-req.Header.Set("Authorization", "Bearer "+apiKey)
-req.Header.Set("Content-Type", "application/json")
-_, _ = http.DefaultClient.Do(req)
+destination, err := client.CreateDestination(ctx, chirpier.Destination{
+    Channel:   "slack",
+    URL:       "https://hooks.slack.com/services/T000/B000/secret",
+    Scope:     "all",
+    PolicyIDs: []string{},
+    Enabled:   true,
+})
 ```
 
-Create a Telegram connector for OpenClaw alerts:
+Create a Telegram destination for OpenClaw alerts:
 
 ```go
-payload := map[string]any{
-    "type":    "telegram",
-    "enabled": true,
-    "credentials": map[string]any{
+destination, err := client.CreateDestination(ctx, chirpier.Destination{
+    Channel:   "telegram",
+    Scope:     "all",
+    PolicyIDs: []string{},
+    Enabled:   true,
+    Credentials: map[string]any{
         "bot_token": "123456:telegram-bot-token",
         "chat_id":   "987654321",
     },
-}
+})
 ```
 
 Send a test notification:
 
 ```go
-err = client.TestWebhook(ctx, "whk_123")
+testResult, err := client.TestDestination(ctx, destination.DestinationID)
+deliveries, err := client.GetAlertDeliveries(ctx, testResult.AlertID, 20, 0, "test")
 ```
 
 ## Test

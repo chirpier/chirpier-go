@@ -25,6 +25,33 @@ type mockRoundTripper struct {
 func TestServicerHelpers(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/v1.0/events":
+			if r.Method == http.MethodPost {
+				_, _ = io.WriteString(w, `{"event_id":"evt_new","event":"tool.errors.count","public":false,"timezone":"UTC"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `[]`)
+		case "/v1.0/events/evt_123/analytics":
+			if got := r.URL.Query().Get("view"); got != "window" {
+				t.Fatalf("expected view window, got %s", got)
+			}
+			if got := r.URL.Query().Get("period"); got != "1h" {
+				t.Fatalf("expected period 1h, got %s", got)
+			}
+			if got := r.URL.Query().Get("previous"); got != "previous_window" {
+				t.Fatalf("expected previous previous_window, got %s", got)
+			}
+			_, _ = io.WriteString(w, `{"event_id":"evt_123","view":"window","period":"1h","previous":"previous_window","data":null}`)
+		case "/v1.0/events/evt_123":
+			_, _ = io.WriteString(w, `{"event_id":"evt_123","event":"tool.errors.count","public":false,"timezone":"UTC"}`)
+		case "/v1.0/policies/pol_123":
+			if r.Method == http.MethodPut {
+				_, _ = io.WriteString(w, `{"policy_id":"pol_123","event_id":"evt_123","title":"Updated","channel":"ops","period":"hour","aggregate":"sum","condition":"gt","threshold":1,"severity":"warning","enabled":true}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"policy_id":"pol_123","event_id":"evt_123","title":"Policy","channel":"ops","period":"hour","aggregate":"sum","condition":"gt","threshold":1,"severity":"warning","enabled":true}`)
+		case "/v1.0/alerts/alrt_123":
+			_, _ = io.WriteString(w, `{"alert_id":"alrt_123","policy_id":"pol_123","event_id":"evt_123","event":"tool.errors.count","title":"Alert","channel":"ops","period":"hour","aggregate":"sum","condition":"gt","threshold":1,"severity":"warning","status":"triggered","value":2,"count":2,"min":1,"max":1}`)
 		case "/v1.0/events/evt_123/logs":
 			if got := r.URL.Query().Get("period"); got != "day" {
 				t.Fatalf("expected period day, got %s", got)
@@ -36,6 +63,18 @@ func TestServicerHelpers(t *testing.T) {
 				t.Fatalf("expected offset 5, got %s", got)
 			}
 			_, _ = io.WriteString(w, `[]`)
+		case "/v1.0/destinations":
+			if r.Method == http.MethodPost {
+				_, _ = io.WriteString(w, `{"destination_id":"dst_123","channel":"slack","scope":"all","enabled":true}`)
+				return
+			}
+			_, _ = io.WriteString(w, `[]`)
+		case "/v1.0/destinations/dst_123":
+			if r.Method == http.MethodPut {
+				_, _ = io.WriteString(w, `{"destination_id":"dst_123","channel":"slack","scope":"all","enabled":false}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"destination_id":"dst_123","channel":"slack","scope":"all","enabled":true}`)
 		case "/v1.0/alerts/alrt_123/deliveries":
 			if got := r.URL.Query().Get("kind"); got != "test" {
 				t.Fatalf("expected kind test, got %s", got)
@@ -52,11 +91,11 @@ func TestServicerHelpers(t *testing.T) {
 				t.Fatalf("expected POST, got %s", r.Method)
 			}
 			_, _ = io.WriteString(w, `{}`)
-		case "/v1.0/webhooks/whk_123/test":
+		case "/v1.0/destinations/whk_123/test":
 			if r.Method != http.MethodPost {
 				t.Fatalf("expected POST, got %s", r.Method)
 			}
-			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"alert_id":"alrt_test_123","destination_id":"whk_123","status":"sent"}`)
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -72,14 +111,64 @@ func TestServicerHelpers(t *testing.T) {
 	if _, err := client.GetEventLogs(context.Background(), "evt_123", "day", 10, 5); err != nil {
 		t.Fatalf("GetEventLogs failed: %v", err)
 	}
+	if createdEvent, err := client.CreateEvent(context.Background(), CreateEventPayload{Event: "tool.errors.count"}); err != nil {
+		t.Fatalf("CreateEvent failed: %v", err)
+	} else if createdEvent.EventID != "evt_new" {
+		t.Fatalf("expected event id evt_new, got %s", createdEvent.EventID)
+	}
+	if eventDef, err := client.GetEvent(context.Background(), "evt_123"); err != nil {
+		t.Fatalf("GetEvent failed: %v", err)
+	} else if eventDef.EventID != "evt_123" {
+		t.Fatalf("expected event id evt_123, got %s", eventDef.EventID)
+	}
+	if analytics, err := client.GetEventAnalytics(context.Background(), "evt_123", AnalyticsWindowQuery{View: "window", Period: "1h", Previous: "previous_window"}); err != nil {
+		t.Fatalf("GetEventAnalytics failed: %v", err)
+	} else if analytics.EventID != "evt_123" {
+		t.Fatalf("expected event id evt_123, got %s", analytics.EventID)
+	}
+	if policy, err := client.GetPolicy(context.Background(), "pol_123"); err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	} else if policy.PolicyID != "pol_123" {
+		t.Fatalf("expected policy id pol_123, got %s", policy.PolicyID)
+	}
+	if updatedPolicy, err := client.UpdatePolicy(context.Background(), "pol_123", Policy{Title: "Updated"}); err != nil {
+		t.Fatalf("UpdatePolicy failed: %v", err)
+	} else if updatedPolicy.Title != "Updated" {
+		t.Fatalf("expected updated title, got %s", updatedPolicy.Title)
+	}
+	if alert, err := client.GetAlert(context.Background(), "alrt_123"); err != nil {
+		t.Fatalf("GetAlert failed: %v", err)
+	} else if alert.AlertID != "alrt_123" {
+		t.Fatalf("expected alert id alrt_123, got %s", alert.AlertID)
+	}
 	if _, err := client.GetAlertDeliveries(context.Background(), "alrt_123", 20, 10, "test"); err != nil {
 		t.Fatalf("GetAlertDeliveries failed: %v", err)
+	}
+	if _, err := client.ListDestinations(context.Background()); err != nil {
+		t.Fatalf("ListDestinations failed: %v", err)
+	}
+	if destination, err := client.CreateDestination(context.Background(), Destination{Channel: "slack", Scope: "all", Enabled: true}); err != nil {
+		t.Fatalf("CreateDestination failed: %v", err)
+	} else if destination.DestinationID != "dst_123" {
+		t.Fatalf("expected destination id dst_123, got %s", destination.DestinationID)
+	}
+	if destination, err := client.GetDestination(context.Background(), "dst_123"); err != nil {
+		t.Fatalf("GetDestination failed: %v", err)
+	} else if destination.DestinationID != "dst_123" {
+		t.Fatalf("expected destination id dst_123, got %s", destination.DestinationID)
+	}
+	if destination, err := client.UpdateDestination(context.Background(), "dst_123", Destination{Enabled: false}); err != nil {
+		t.Fatalf("UpdateDestination failed: %v", err)
+	} else if destination.Enabled {
+		t.Fatal("expected destination to be disabled")
 	}
 	if _, err := client.ArchiveAlert(context.Background(), "alrt_123"); err != nil {
 		t.Fatalf("ArchiveAlert failed: %v", err)
 	}
-	if err := client.TestWebhook(context.Background(), "whk_123"); err != nil {
-		t.Fatalf("TestWebhook failed: %v", err)
+	if result, err := client.TestDestination(context.Background(), "whk_123"); err != nil {
+		t.Fatalf("TestDestination failed: %v", err)
+	} else if result.AlertID != "alrt_test_123" {
+		t.Fatalf("expected alert id alrt_test_123, got %s", result.AlertID)
 	}
 }
 
