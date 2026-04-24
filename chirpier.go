@@ -246,9 +246,45 @@ type Error struct {
 	Message string
 }
 
+type nonRetryableError struct {
+	err error
+}
+
+type retryPolicy int
+
+const (
+	retryPolicyNone retryPolicy = iota
+	retryPolicyRetry
+	retryPolicyRetryAfter
+)
+
 // Error returns the error message.
 func (e *Error) Error() string {
 	return e.Message
+}
+
+func (e *nonRetryableError) Error() string {
+	return e.err.Error()
+}
+
+func (e *nonRetryableError) Unwrap() error {
+	return e.err
+}
+
+func classifyLogResponseStatus(statusCode int) retryPolicy {
+	switch {
+	case statusCode == http.StatusTooManyRequests:
+		return retryPolicyRetryAfter
+	case statusCode >= http.StatusInternalServerError:
+		if statusCode == http.StatusInternalServerError || statusCode == http.StatusServiceUnavailable {
+			return retryPolicyNone
+		}
+		return retryPolicyRetry
+	case statusCode >= http.StatusBadRequest:
+		return retryPolicyNone
+	default:
+		return retryPolicyNone
+	}
 }
 
 // Client handles communication with the Chirpier API.
@@ -776,6 +812,10 @@ func (c *Client) Log(ctx context.Context, entry Log) error {
 		entry.OccurredAt = entry.OccurredAt.UTC()
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -875,6 +915,14 @@ func (c *Client) worker(id int) {
 
 		ctx := context.Background()
 		if err := c.sendLogs(ctx, batch); err != nil {
+			var nonRetryable *nonRetryableError
+			if errors.As(err, &nonRetryable) {
+				if c.logLevel >= LogLevelError {
+					log.Printf("Worker %d: Dropping non-retriable batch error: %v", id, nonRetryable.err)
+				}
+				atomic.AddInt32(&c.inFlight, -1)
+				continue
+			}
 			if c.logLevel >= LogLevelError {
 				log.Printf("Worker %d: Error sending batch: %v", id, err)
 			}
@@ -1021,7 +1069,14 @@ func (c *Client) sendLogs(ctx context.Context, entries []Log) error {
 		defer resp.Body.Close()
 
 		if resp.StatusCode >= http.StatusBadRequest {
-			if resp.StatusCode == http.StatusTooManyRequests {
+			bodyBytes, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				return fmt.Errorf("failed to read error response body: %w", readErr)
+			}
+			bodyText := strings.TrimSpace(string(bodyBytes))
+
+			switch classifyLogResponseStatus(resp.StatusCode) {
+			case retryPolicyRetryAfter:
 				retryAfter := 1 * time.Second // Default retry after 1 second
 				if retryAfterStr := resp.Header.Get("Retry-After"); retryAfterStr != "" {
 					if seconds, err := strconv.Atoi(retryAfterStr); err == nil {
@@ -1029,9 +1084,31 @@ func (c *Client) sendLogs(ctx context.Context, entries []Log) error {
 					}
 				}
 				time.Sleep(retryAfter)
+				if bodyText != "" {
+					return fmt.Errorf("request failed with status code: %d: %s", resp.StatusCode, bodyText)
+				}
 				return fmt.Errorf("rate limited, retry after %v", retryAfter)
+			case retryPolicyRetry:
+				if bodyText != "" {
+					return fmt.Errorf("request failed with status code: %d: %s", resp.StatusCode, bodyText)
+				}
+				return fmt.Errorf("request failed with status code: %d", resp.StatusCode)
+			default:
+				err := fmt.Errorf("request failed with status code: %d", resp.StatusCode)
+				if bodyText != "" {
+					err = fmt.Errorf("request failed with status code: %d: %s", resp.StatusCode, bodyText)
+				}
+				if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+					if c.logLevel >= LogLevelError {
+						if bodyText != "" {
+							log.Printf("Chirpier API returned %d: %s", resp.StatusCode, bodyText)
+						} else {
+							log.Printf("Chirpier API returned %d", resp.StatusCode)
+						}
+					}
+				}
+				return &nonRetryableError{err: err}
 			}
-			return fmt.Errorf("request failed with status code: %d", resp.StatusCode)
 		}
 
 		return nil
@@ -1052,6 +1129,10 @@ func (c *Client) retryRequest(ctx context.Context, requestFunc func() error) err
 
 		if err = requestFunc(); err == nil {
 			return nil
+		}
+		var nonRetryable *nonRetryableError
+		if errors.As(err, &nonRetryable) {
+			return nonRetryable
 		}
 
 		if attempt < c.retries {

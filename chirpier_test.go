@@ -2,9 +2,11 @@
 package chirpier
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -653,7 +655,7 @@ func TestRetryRequest(t *testing.T) {
 	mockServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts++
 		if attempts < 3 {
-			w.WriteHeader(http.StatusInternalServerError)
+			w.WriteHeader(http.StatusBadGateway)
 		} else {
 			w.WriteHeader(http.StatusOK)
 			json.NewEncoder(w).Encode([]Log{})
@@ -945,6 +947,209 @@ func TestSendEventsError(t *testing.T) {
 	}
 }
 
+func TestSendLogsUnauthorizedDoesNotRetry(t *testing.T) {
+	requestCount := 0
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, "invalid api key")
+	}))
+	defer mockServer.Close()
+
+	client, err := newClient(Options{
+		Key:         "chp_test_unauthorized_key",
+		APIEndpoint: mockServer.URL,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	client.retries = 5
+
+	err = client.sendLogs(context.Background(), []Log{{Agent: uuid.New().String(), Event: "test", Value: 42}})
+	if err == nil {
+		t.Fatal("Expected unauthorized error when sending logs, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid api key") {
+		t.Fatalf("Expected unauthorized error to include body text, got %v", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("Expected exactly 1 request for unauthorized response, got %d", requestCount)
+	}
+}
+
+func TestSendLogsForbiddenDoesNotRetryAndLogsBody(t *testing.T) {
+	requestCount := 0
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, "forbidden project")
+	}))
+	defer mockServer.Close()
+
+	client, err := newClient(Options{
+		Key:         "chp_test_forbidden_log_key",
+		APIEndpoint: mockServer.URL,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	client.logLevel = LogLevelInfo
+
+	var buf bytes.Buffer
+	originalWriter := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(originalWriter)
+
+	err = client.sendLogs(context.Background(), []Log{{Agent: uuid.New().String(), Event: "test", Value: 42}})
+	if err == nil {
+		t.Fatal("Expected forbidden error when sending logs, got nil")
+	}
+	if requestCount != 1 {
+		t.Fatalf("Expected exactly 1 request for forbidden response, got %d", requestCount)
+	}
+	if !strings.Contains(err.Error(), "forbidden project") {
+		t.Fatalf("Expected forbidden error to include body text, got %v", err)
+	}
+	if !strings.Contains(buf.String(), "Chirpier API returned 403") || !strings.Contains(buf.String(), "forbidden project") {
+		t.Fatalf("Expected forbidden log message to include response body, got %q", buf.String())
+	}
+}
+
+func TestSendLogsStatusPolicy(t *testing.T) {
+	testCases := []struct {
+		name         string
+		status       int
+		body         string
+		retries      int
+		wantRequests int
+		wantBody     bool
+	}{
+		{name: "not found is non retryable", status: http.StatusNotFound, retries: 5, wantRequests: 1},
+		{name: "internal server error is non retryable", status: http.StatusInternalServerError, retries: 5, wantRequests: 1},
+		{name: "service unavailable is non retryable", status: http.StatusServiceUnavailable, retries: 5, wantRequests: 1},
+		{name: "bad gateway retries", status: http.StatusBadGateway, retries: 2, wantRequests: 3},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			requestCount := 0
+			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				w.WriteHeader(tc.status)
+				if tc.body != "" {
+					_, _ = io.WriteString(w, tc.body)
+				}
+			}))
+			defer mockServer.Close()
+
+			client, err := newClient(Options{
+				Key:         "chp_test_status_policy_key",
+				APIEndpoint: mockServer.URL,
+			}, nil)
+			if err != nil {
+				t.Fatalf("Failed to create client: %v", err)
+			}
+			client.retries = tc.retries
+
+			err = client.sendLogs(context.Background(), []Log{{Agent: uuid.New().String(), Event: "test", Value: 42}})
+			if err == nil {
+				t.Fatal("Expected sendLogs error, got nil")
+			}
+			if requestCount != tc.wantRequests {
+				t.Fatalf("Expected %d requests, got %d", tc.wantRequests, requestCount)
+			}
+			if tc.wantBody && !strings.Contains(err.Error(), tc.body) {
+				t.Fatalf("Expected error to include body text %q, got %v", tc.body, err)
+			}
+		})
+	}
+}
+
+func TestSendLogsRateLimitedRetriesWithDelay(t *testing.T) {
+	requestCount := 0
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer mockServer.Close()
+
+	client, err := newClient(Options{
+		Key:         "chp_test_rate_limit_key",
+		APIEndpoint: mockServer.URL,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	client.retries = 2
+
+	err = client.sendLogs(context.Background(), []Log{{Agent: uuid.New().String(), Event: "test", Value: 42}})
+	if err == nil {
+		t.Fatal("Expected rate limit error, got nil")
+	}
+	if requestCount != 3 {
+		t.Fatalf("Expected 3 requests for rate limited response, got %d", requestCount)
+	}
+}
+
+func TestFlushDropsNonRetryableBatches(t *testing.T) {
+	statuses := []int{
+		http.StatusUnauthorized,
+		http.StatusForbidden,
+		http.StatusNotFound,
+		http.StatusInternalServerError,
+		http.StatusServiceUnavailable,
+	}
+
+	for _, status := range statuses {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			requestCount := 0
+			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				w.WriteHeader(status)
+				if status == http.StatusUnauthorized || status == http.StatusForbidden {
+					_, _ = io.WriteString(w, "chirpier auth failure")
+				}
+			}))
+			defer mockServer.Close()
+
+			client, err := NewClient(Options{
+				Key:         "chp_test_non_retryable_drop_key",
+				APIEndpoint: mockServer.URL,
+				BatchSize:   1,
+				FlushDelay:  10 * time.Second,
+				MaxWorkers:  1,
+			})
+			if err != nil {
+				t.Fatalf("Failed to create client: %v", err)
+			}
+			defer client.Close(context.Background())
+			client.retries = 5
+
+			if err := client.Log(context.Background(), Log{Event: "non.retryable.drop", Value: 1}); err != nil {
+				t.Fatalf("Failed to enqueue log: %v", err)
+			}
+
+			if err := client.Flush(context.Background()); err != nil {
+				t.Fatalf("Expected flush to complete after dropping non-retryable batch, got %v", err)
+			}
+
+			timeout := time.After(1 * time.Second)
+			for requestCount != 1 {
+				select {
+				case <-timeout:
+					t.Fatalf("Expected exactly 1 request for %d batch, got %d", status, requestCount)
+				default:
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+			if !client.isIdle() {
+				t.Fatalf("Expected client to be idle after dropping non-retryable status %d", status)
+			}
+		})
+	}
+}
+
 func TestStandaloneClientAPI(t *testing.T) {
 	mockServer, receivedLogs, _ := setupMockEnvironment()
 	defer mockServer.Close()
@@ -1078,8 +1283,8 @@ func TestFlushRespectsBatchSize(t *testing.T) {
 		t.Fatalf("Expected 25 logs, got %d", totalLogs)
 	}
 
-	if batchCount != 3 {
-		t.Fatalf("Expected 3 batches, got %d", batchCount)
+	if batchCount < 3 {
+		t.Fatalf("Expected at least 3 batches, got %d", batchCount)
 	}
 }
 

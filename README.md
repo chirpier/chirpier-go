@@ -100,6 +100,11 @@ err := chirpier.Initialize(chirpier.Options{
 API keys must be bearer tokens that start with `chp_`.
 The same bearer token works for ingest and servicer APIs.
 
+### Retry behavior
+
+The SDK retries network/transport failures, `429` responses, and retryable `5xx` responses such as `502` and `504`.
+It does not retry `401`, `403`, `404`, `500`, or `503`, and `401`/`403` errors surface the Chirpier response message when available.
+
 ### NewClient (Recommended)
 
 Create a standalone client instance instead of using global state.
